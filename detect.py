@@ -5,6 +5,8 @@ import torch.backends.cudnn as cudnn
 from models.experimental import *
 from utils.datasets import *
 from utils.utils import *
+import clip
+from clip_config import CLIP_CONFIG
 
 
 def detect(save_img=False):
@@ -24,14 +26,18 @@ def detect(save_img=False):
     imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
     if half:
         model.half()  # to FP16
-
+    
     # Second-stage classifier
     classify = False
     if classify:
         modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
         modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
         modelc.to(device).eval()
-
+    
+    clip_classify = True
+    if clip_classify:
+        clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+    
     # Set Dataloader
     vid_path, vid_writer = None, None
     if webcam:
@@ -44,7 +50,7 @@ def detect(save_img=False):
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
+    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names)+1)]
 
     # Run inference
     t0 = time.time()
@@ -68,9 +74,12 @@ def detect(save_img=False):
         # Apply Classifier
         if classify:
             pred = apply_classifier(pred, modelc, img, im0s)
+        if clip_classify:
+            pred, preds_cls2 = clip_classifier(pred, clip_model, clip_preprocess, img, im0s, CLIP_CONFIG['gender']['base'], CLIP_CONFIG['gender']['text'])
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
+            pred_cls2 = preds_cls2[i]
             if webcam:  # batch_size >= 1
                 p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
             else:
@@ -88,17 +97,22 @@ def detect(save_img=False):
                 for c in det[:, -1].unique():
                     n = (det[:, -1] == c).sum()  # detections per class
                     s += '%g %ss, ' % (n, names[int(c)])  # add to string
-
+                
                 # Write results
-                for *xyxy, conf, cls in det:
+                for k, (*xyxy, conf, cls) in enumerate(det):
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         with open(txt_path + '.txt', 'a') as f:
                             f.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
 
                     if save_img or view_img:  # Add bbox to image
-                        label = '%s %.2f' % (names[int(cls)], conf)
-                        plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
+                        if k in pred_cls2: # gender
+                            cls2_cls = pred_cls2[k][0]
+                            cls2_conf = pred_cls2[k][1]
+                            label = '%s %.2f' % (CLIP_CONFIG['gender']['names'][cls2_cls], cls2_conf)
+                        else: 
+                            label = '%s %.2f' % (names[int(cls)], conf)
+                        plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=1)
 
             # Print time (inference + NMS)
             print('%sDone. (%.3fs)' % (s, t2 - t1))
@@ -159,3 +173,8 @@ if __name__ == '__main__':
                 create_pretrained(opt.weights, opt.weights)
         else:
             detect()
+    
+
+    """
+        python detect.py --source ./playground/1.jpg --weights ./weights/helmet_head_person_m.pt
+    """

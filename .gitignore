@@ -143,4 +143,5 @@ inference/output - 副本/
 inference/
 qt_chart_demos/
 weights/
+/playground/
 area_dangerous/bk/

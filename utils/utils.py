@@ -11,6 +11,8 @@ from pathlib import Path
 from sys import platform
 
 import cv2
+import clip
+from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,6 +22,7 @@ import torchvision
 import yaml
 from scipy.signal import butter, filtfilt
 from tqdm import tqdm
+
 
 from . import torch_utils  #  torch_utils, google_utils
 
@@ -885,6 +888,42 @@ def apply_classifier(x, model, img, im0):
 
     return x
 
+def clip_classifier(x, model, preprocess, img, im0, base='body', text_list=['a male body', 'a female body']):
+    # applies a second stage classifier to yolo outputs
+    text = clip.tokenize(text_list).to(x[0].device)
+
+    im0 = [im0] if isinstance(im0, np.ndarray) else im0
+    preds_cls2 = []
+    for i, d in enumerate(x):  # per image
+        if d is not None and len(d):
+            d = d.clone()
+
+            # Reshape and pad cutouts
+            b = xyxy2xywh(d[:, :4])  # boxes
+            d[:, :4] = xywh2xyxy(b).long()
+
+            # Rescale boxes from img_size to im0 size
+            scale_coords(img.shape[2:], d[:, :4], im0[i].shape)
+
+            # Classes
+            pred_cls1 = d[:, 5].long()
+            pred_cls2 = dict()
+            ims = []
+            for j, a in enumerate(d):  # per item
+                if base == 'body' and a[5] == 0:
+                    cutout = im0[i][int(a[1]):int(a[3]), int(a[0]):int(a[2])]
+                    im = Image.fromarray(cv2.cvtColor(cutout, cv2.COLOR_BGR2RGB))
+
+                    clip_im = preprocess(im).unsqueeze(0).to(d.device)
+
+                    logits_per_image, logits_per_text = model(clip_im, text)
+                    probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+                    pred_label = np.argmax(probs)
+                    pred_cls2[j] = [pred_label, probs[0][pred_label]]
+                    # im.save(f'./playground/cutout/{j}_{pred_label}.jpg')
+            preds_cls2.append(pred_cls2)
+    
+    return x, preds_cls2
 
 def fitness(x):
     # Returns fitness (for use with results.txt or evolve.txt)
